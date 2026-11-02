@@ -181,7 +181,14 @@ Use **1.1.0 or later**. v1.0.0's auditor checked the descriptors a resolver retu
 
 What has actually been run, and where:
 
-- **v1.1.0:** _CI results are added here once the first runs for this version report._
+- **v1.1.0, GitHub Actions** ([Actions tab](https://github.com/rajatslakhina/ai-capability-plane-kit/actions/workflows/ci.yml)). Both jobs passed on the release commit:
+  - **Linux** (`swift:6.0` container): `swift build -Xswiftc -warnings-as-errors` succeeds, then `swift test -Xswiftc -warnings-as-errors` runs **70 tests with 0 failures**.
+  - **macOS** (`macos-15`): the job prints its toolchain (Xcode 16.4, Swift 6.1.2), then `swift test -Xswiftc -warnings-as-errors` runs **75 tests with 0 failures**. That is the 70 core tests plus the 5 `ConsoleModelTests`. Then `xcodebuild build -scheme CapabilityPlane-Package -destination 'generic/platform=iOS Simulator'` builds every product, including the SwiftUI target.
+- **v1.1.0, locally:**
+  - A clean Linux build (Swift 6.0.3) after `rm -rf .build` has 0 warnings and passes 70/70.
+  - On a Mac with Xcode 27.2, 70 + 5 tests pass with warnings as errors, and the iOS Simulator build of the package succeeds.
+  - A separate package that imports `CapabilityPlane` without `@testable` compiles and runs a custom resolver. That check covers the public initializers.
+- **iOS Simulator:** the demo app's README records the Simulator runs made against each published release.
 - **v1.0.0 (history)** ([Actions tab](https://github.com/rajatslakhina/ai-capability-plane-kit/actions/workflows/ci.yml)):
   - **Linux** (`swift:6.0`): build with warnings as errors, then **64 tests, 0 failures**.
   - **macOS** (`macos-15`): **68 tests, 0 failures** (64 core plus 4 `ConsoleModelTests`), then an iOS Simulator build of every product.
