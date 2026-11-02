@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux · swift build (warnings as errors) + swift test
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (warnings are errors)
+        run: swift build -Xswiftc -warnings-as-errors
+      - name: Test
+        run: swift test -Xswiftc -warnings-as-errors
+
+  apple:
+    name: macOS · swift test (incl. console-model tests) + iOS Simulator build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test on macOS
+        run: swift test -Xswiftc -warnings-as-errors
+      - name: Build every product for iOS Simulator
+        run: |
+          xcodebuild build \
+            -scheme CapabilityPlane-Package \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO
