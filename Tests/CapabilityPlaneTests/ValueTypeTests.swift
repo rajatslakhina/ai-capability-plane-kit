@@ -118,6 +118,13 @@ final class ValueTypeTests: XCTestCase {
         XCTAssertEqual(buffer.events, [.configApplied(version: 2)])
         XCTAssertEqual(buffer.droppedCount, 1)
 
+        // Hostile capacities are clamped instead of trapping the allocator.
+        let huge = BoundedTelemetryBuffer(capacity: .max)
+        XCTAssertEqual(huge.capacity, BoundedTelemetryBuffer.maxCapacity)
+        huge.record(.configApplied(version: 1))
+        XCTAssertEqual(huge.events.count, 1)
+        XCTAssertEqual(BoundedTelemetryBuffer(capacity: 4_000_000_000_000).capacity, BoundedTelemetryBuffer.maxCapacity)
+
         let ring = BoundedTelemetryBuffer(capacity: 3)
         for v in 1...5 { ring.record(.configApplied(version: UInt64(v))) }
         XCTAssertEqual(ring.events, [3, 4, 5].map { PlaneEvent.configApplied(version: $0) }, "oldest-first after wrap")

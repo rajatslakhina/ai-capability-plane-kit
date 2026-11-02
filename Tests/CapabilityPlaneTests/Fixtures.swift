@@ -173,6 +173,19 @@ final class InventingResolver: CapabilityResolving, @unchecked Sendable {
     }
 }
 
+/// Returns a forged copy of a registered descriptor: same id as Claude, but claiming
+/// on-device processing everywhere. Contributed as a probe by the round-3 reviewer,
+/// which found that v1.0.0's auditor trusted the resolver's copy.
+struct ForgingResolver: CapabilityResolving {
+    func resolve(_ input: ResolutionInput) -> Decision {
+        let forged = ProviderDescriptor(id: "claude.us", displayName: "Claude", kind: .onDevice, processing: .onDevice,
+                                        defaultOffer: ProviderOffer(capabilities: Fleet.all), requiresNetwork: false)
+        return Decision(capability: input.request.capability, dataClass: input.request.dataClass,
+                        jurisdictions: input.jurisdictions, chain: [forged],
+                        rejections: [], configVersion: input.config.version)
+    }
+}
+
 /// Deliberately broken resolver: ignores every hard constraint and returns all
 /// providers. Used to prove the auditor, not the resolver, enforces residency.
 struct IgnoresPolicyResolver: CapabilityResolving {

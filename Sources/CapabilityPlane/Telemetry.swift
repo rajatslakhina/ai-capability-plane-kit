@@ -25,7 +25,9 @@ public struct NullTelemetry: TelemetrySink {
 
 /// Bounded in-memory sink: keeps the newest `capacity` events and counts the rest.
 /// Bounded on purpose; an unbounded telemetry buffer is a memory leak with a dashboard.
-/// Implemented as a ring buffer so each `record` is O(1).
+/// Implemented as a ring buffer so each `record` is O(1). Capacity is clamped to
+/// `1...maxCapacity`, and storage grows on demand rather than being reserved up front.
+/// A hostile capacity such as `Int.max` therefore cannot trap the allocator.
 public final class BoundedTelemetryBuffer: TelemetrySink, @unchecked Sendable {
     // @unchecked: `storage`, `head` and `dropped` are only touched while holding `lock`.
     private let lock = NSLock()
@@ -33,10 +35,10 @@ public final class BoundedTelemetryBuffer: TelemetrySink, @unchecked Sendable {
     private var head = 0          // index of the oldest event once the ring is full
     private var dropped = 0
     public let capacity: Int
+    public static let maxCapacity = 65_536
 
     public init(capacity: Int = 256) {
-        self.capacity = max(1, capacity)
-        storage.reserveCapacity(self.capacity)
+        self.capacity = min(max(1, capacity), Self.maxCapacity)
     }
 
     public func record(_ event: PlaneEvent) {

@@ -80,6 +80,20 @@ final class ConsoleModelTests: XCTestCase {
         XCTAssertEqual(model.decision?.chain.first?.id, "device")
     }
 
+    func testToggleKillTargetsTheOnScreenRegionWithoutARefresh() async {
+        // The pickers changed (US -> DE) but no refresh has published yet, so
+        // `model.jurisdictions` is still [US]. The kill must land on the region on screen.
+        let model = makeModel()
+        await model.refresh()
+        XCTAssertEqual(model.jurisdictions, [.unitedStates])
+        model.storefront = de
+        model.deviceRegion = de
+        await model.toggleKill("device")
+        let switches = await model.plane.config.killSwitches
+        XCTAssertEqual(switches, [KillSwitch(jurisdiction: .europeanUnion, providerID: "device")])
+        XCTAssertEqual(model.killedProviders, ["device"])
+    }
+
     func testRunResultIsDroppedIfTheRequestChangedMidFlight() async {
         let latch = Latch()
         let model = makeModel(adapters: [LatchedAdapter(descriptor: onDevice, latch: latch)])

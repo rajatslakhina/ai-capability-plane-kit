@@ -332,9 +332,11 @@ final class CapabilityPlaneTests: XCTestCase {
         _ = await plane.perform(Fleet.request(.summarize, .sensitive))
         _ = await plane.perform(Fleet.request(.summarize, .sensitive))   // second failure opens the breaker
         XCTAssertEqual(apple.calls, 2)
-        _ = await plane.perform(Fleet.request(.summarize, .sensitive))
+        let third = await plane.perform(Fleet.request(.summarize, .sensitive))
         XCTAssertEqual(apple.calls, 2, "open breaker must not be dispatched to, whatever the resolver says")
         XCTAssertEqual(claude.calls, 0)
+        // The skip is reported, not silent.
+        XCTAssertTrue(third.auditFindings.contains(ResidencyAuditor.Finding(providerID: "apple.ondevice", reasons: [.circuitOpen])))
     }
 
     func testEmptyJurisdictionListFailsClosed() {
@@ -342,5 +344,86 @@ final class CapabilityPlaneTests: XCTestCase {
                                             jurisdictions: [], config: Fleet.config())
         XCTAssertTrue(result.approved.isEmpty)
         XCTAssertEqual(result.findings.first?.reasons, [.noBindingJurisdiction])
+        XCTAssertTrue(RejectionReason.noBindingJurisdiction.isHard, "must be enforced by the auditor, not treated as operational")
+    }
+
+    // MARK: Trust boundary (round-3 review finding, fixed in v1.1.0)
+
+    func testAuditorChecksTheRegisteredDescriptorNotTheResolversCopy() async {
+        let apple = CountingAdapter(Fleet.apple), claude = CountingAdapter(Fleet.claude)
+        // Sensitive data, device in China: only on-device is allowed, and Claude is not offered in CN.
+        let plane = makePlane([apple, claude], context: Fleet.context("CN", os: OSVersion(27, 3)), resolver: ForgingResolver())
+        let outcome = await plane.perform(Fleet.request(.summarize, .sensitive))
+        XCTAssertEqual(claude.calls, 0, "a relabelled descriptor must not carry a sensitive CN payload to a US-hosted adapter")
+        XCTAssertEqual(outcome.kind, .degraded(output: "Quarterly report", reason: .noEligibleProvider))
+        let reasons = outcome.auditFindings.first(where: { $0.providerID == "claude.us" })?.reasons ?? []
+        XCTAssertTrue(reasons.contains(.notOffered(in: .china)))
+        XCTAssertTrue(reasons.contains(.residency(location: .hostedIn(.unitedStates), dataClass: .sensitive, in: .china)))
+        // The trace shows the registered provider, not the forgery.
+        XCTAssertEqual(outcome.decision.chain.first?.processing, .hostedIn(.unitedStates))
+    }
+
+    func testForgedDescriptorCannotDodgeAKillSwitch() async {
+        let claude = CountingAdapter(Fleet.claude)
+        let plane = makePlane([claude], context: Fleet.context("US"),
+                              config: Fleet.config(kills: [KillSwitch(providerID: "claude.us")]), resolver: ForgingResolver())
+        _ = await plane.perform(Fleet.request(.summarize, .publicContent))
+        XCTAssertEqual(claude.calls, 0)
+    }
+
+    // MARK: Context changes that are not jurisdiction changes
+
+    func testOSVersionChangeMidFlightIsReaudited() async {
+        // Apple on-device needs iOS 27.3 in China. If the reported OS drops below that while a
+        // call is in flight, the answer must be re-audited and dropped, even though the binding
+        // jurisdictions did not change.
+        let gate = Gate()
+        let apple = CountingAdapter(Fleet.apple, gate: gate), cn = CountingAdapter(Fleet.regionalCN)
+        let plane = makePlane([apple, cn], context: Fleet.context("CN", os: OSVersion(27, 3)))
+        let inFlight = Task { await plane.perform(Fleet.request()) }
+        await waitForArrival(gate)
+        let changed = await plane.updateContext(Fleet.context("CN", os: OSVersion(27, 2)))
+        XCTAssertTrue(changed, "an OS-only change is policy-relevant")
+        await gate.open()
+        let outcome = await inFlight.value
+        XCTAssertEqual(outcome.attempts.map(\.result), [.discardedAfterPolicyChange, .served])
+        XCTAssertEqual(outcome.kind, .served(providerID: "regional.cn", output: "regional.cn:summarize"))
+    }
+
+    func testConnectivityChangeBumpsTheGeneration() async {
+        let plane = makePlane([CountingAdapter(Fleet.apple)])
+        let changed = await plane.updateContext(Fleet.context("US", online: false))
+        XCTAssertTrue(changed)
+        let generation = await plane.contextGeneration
+        XCTAssertEqual(generation, 1)
+    }
+
+    // MARK: Snapshot and atomic kill toggle (console support)
+
+    func testSnapshotIsOneConsistentView() async {
+        let plane = makePlane([CountingAdapter(Fleet.apple), CountingAdapter(Fleet.claude)])
+        await plane.toggleProviderKill("apple.ondevice")
+        let snapshot = await plane.snapshot(for: Fleet.request())
+        XCTAssertEqual(snapshot.jurisdictions, [.unitedStates])
+        XCTAssertEqual(snapshot.config.version, 2)
+        XCTAssertEqual(snapshot.killedProviderIDs, ["apple.ondevice"])
+        XCTAssertEqual(snapshot.decision.chain.map(\.id), ["claude.us"], "decision reflects the same config")
+        XCTAssertEqual(snapshot.decision.configVersion, snapshot.config.version)
+        XCTAssertEqual(snapshot.providers.map(\.id), ["apple.ondevice", "claude.us"])
+    }
+
+    func testToggleProviderKillUsesTheScopeBindingAtThatInstant() async {
+        let plane = makePlane([CountingAdapter(Fleet.apple)])
+        await plane.toggleProviderKill("apple.ondevice")                       // US
+        await plane.updateContext(Fleet.context("DE"))
+        let inEU = await plane.snapshot(for: Fleet.request()).killedProviderIDs
+        XCTAssertEqual(inEU, [], "a US-scoped switch does not apply in the EU")
+        await plane.toggleProviderKill("apple.ondevice")                       // adds EU, keeps US
+        let both = await plane.config.killSwitches
+        XCTAssertEqual(both, [KillSwitch(jurisdiction: .unitedStates, providerID: "apple.ondevice"),
+                              KillSwitch(jurisdiction: .europeanUnion, providerID: "apple.ondevice")])
+        await plane.toggleProviderKill("apple.ondevice")                       // killed here, so remove all
+        let none = await plane.config.killSwitches
+        XCTAssertEqual(none, [])
     }
 }

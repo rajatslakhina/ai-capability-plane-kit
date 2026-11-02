@@ -23,6 +23,10 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      # Not pinned: macos-15 images rotate their Xcode installs, and a hard-coded path
+      # breaks when one is removed. The version is printed so every run is traceable.
+      - name: Toolchain versions
+        run: xcodebuild -version && swift --version
       - name: Test on macOS
         run: swift test -Xswiftc -warnings-as-errors
       - name: Build every product for iOS Simulator

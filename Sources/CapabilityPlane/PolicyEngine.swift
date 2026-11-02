@@ -49,6 +49,11 @@ public enum RejectionReason: Sendable, Hashable, CustomStringConvertible {
 public struct Rejection: Sendable, Hashable {
     public let providerID: String
     public let reasons: [RejectionReason]
+
+    public init(providerID: String, reasons: [RejectionReason]) {
+        self.providerID = providerID
+        self.reasons = reasons
+    }
 }
 
 /// Everything a resolver needs, captured as one immutable snapshot. Resolvers are
@@ -61,6 +66,19 @@ public struct ResolutionInput: Sendable {
     public let config: PlaneConfig
     public let parity: ParityLedger
     public let health: [String: HealthVerdict]
+
+    /// Public so resolvers outside this module can be unit-tested without a plane.
+    public init(request: CapabilityRequest, context: RegionContext, jurisdictions: [Jurisdiction],
+                providers: [ProviderDescriptor], config: PlaneConfig, parity: ParityLedger,
+                health: [String: HealthVerdict]) {
+        self.request = request
+        self.context = context
+        self.jurisdictions = jurisdictions
+        self.providers = providers
+        self.config = config
+        self.parity = parity
+        self.health = health
+    }
 }
 
 /// The output of a resolver: a ranked chain plus an explanation for everything left out.
@@ -192,10 +210,19 @@ public struct PolicyEngine: CapabilityResolving {
 /// Defense in depth: resolvers are pluggable (A/B ranking experiments, a server-driven
 /// resolver, a vendor SDK), but residency and kill switches are not negotiable. The
 /// plane runs every chain through this before it sends a byte anywhere.
+///
+/// The audit is only as good as the descriptors it is given: pass the descriptors you
+/// *registered*, never ones a resolver returned. `CapabilityPlane` maps every id in a
+/// resolver's chain back to its registered descriptor before calling this.
 public enum ResidencyAuditor {
     public struct Finding: Sendable, Hashable {
         public let providerID: String
         public let reasons: [RejectionReason]
+
+        public init(providerID: String, reasons: [RejectionReason]) {
+            self.providerID = providerID
+            self.reasons = reasons
+        }
     }
 
     /// Splits `chain` into providers that pass every hard constraint (order preserved)

@@ -58,27 +58,27 @@ public final class CapabilityConsoleModel: ObservableObject {
     /// Pushes the current scenario into the plane and re-previews the decision.
     /// Rapid picker changes start overlapping refreshes; a token makes sure only the
     /// newest one publishes, so a slow, stale preview can never overwrite a fresh one.
-    /// Everything shown (including which providers read as "Killed") is derived from
-    /// the plane's state, never kept as a separate local copy that could drift.
+    /// Everything shown (including which providers read as "Killed") comes from one
+    /// `PlaneSnapshot`, read in a single actor hop, so the screen never mixes states
+    /// from different moments and keeps no local copy that could drift.
     public func refresh(keepOutcome: Bool = false) async {
         refreshToken = refreshToken.saturatingIncrement()
         let token = refreshToken
         let request = self.request
-        await plane.updateContext(RegionContext(storefront: storefront, deviceRegion: deviceRegion,
-                                                osVersion: osVersion, isOnline: isOnline))
-        let newProviders = await plane.providers
-        let newJurisdictions = await plane.jurisdictions
-        let newDecision = await plane.preview(request)
-        let parity = await plane.parity
-        let config = await plane.config
+        await plane.updateContext(onScreenContext)
+        let snapshot = await plane.snapshot(for: request)
         guard token == refreshToken else { return }
-        providers = newProviders
-        jurisdictions = newJurisdictions
-        decision = newDecision
-        parityGaps = Capability.allCases.compactMap { parity.parityGap(for: $0) }
-        configVersion = config.version
-        killedProviders = Set(newProviders.map(\.id).filter { config.isProviderKilled($0, in: newJurisdictions) })
+        providers = snapshot.providers
+        jurisdictions = snapshot.jurisdictions
+        decision = snapshot.decision
+        parityGaps = Capability.allCases.compactMap { snapshot.parity.parityGap(for: $0) }
+        configVersion = snapshot.config.version
+        killedProviders = snapshot.killedProviderIDs
         if !keepOutcome { outcome = nil }
+    }
+
+    private var onScreenContext: RegionContext {
+        RegionContext(storefront: storefront, deviceRegion: deviceRegion, osVersion: osVersion, isOnline: isOnline)
     }
 
     /// Dispatches the request for real (through simulated adapters). The result is
@@ -90,10 +90,9 @@ public final class CapabilityConsoleModel: ObservableObject {
         isRunning = true
         defer { isRunning = false }
         let request = self.request
-        let context = RegionContext(storefront: storefront, deviceRegion: deviceRegion, osVersion: osVersion, isOnline: isOnline)
+        let context = onScreenContext
         let result = await plane.perform(request)
-        let currentContext = RegionContext(storefront: storefront, deviceRegion: deviceRegion, osVersion: osVersion, isOnline: isOnline)
-        guard request == self.request, context == currentContext else { return }
+        guard request == self.request, context == onScreenContext else { return }
         outcome = result
         await refresh(keepOutcome: true)   // breaker state may have changed; token-guarded
     }
@@ -102,12 +101,11 @@ public final class CapabilityConsoleModel: ObservableObject {
     /// read-modify-write happens inside the plane actor, so rapid taps compose
     /// instead of racing, and the button state is re-derived from the result.
     public func toggleKill(_ providerID: String) async {
-        // Push the scenario on screen first and take the scope from the plane, so a tap
-        // right after a picker change targets the region the user is looking at.
-        await plane.updateContext(RegionContext(storefront: storefront, deviceRegion: deviceRegion,
-                                                osVersion: osVersion, isOnline: isOnline))
-        let scope = await plane.jurisdictions
-        await plane.updateKillSwitches { $0.togglingKill(providerID, in: scope) }
+        // Push the scenario on screen first, then let the plane take the scope from its
+        // own context in the same atomic step as the update. A tap right after a picker
+        // change targets the region the user is looking at.
+        await plane.updateContext(onScreenContext)
+        await plane.toggleProviderKill(providerID)
         await refresh()
     }
 

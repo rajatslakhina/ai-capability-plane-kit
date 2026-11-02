@@ -49,7 +49,11 @@ public struct CapabilityOutcome: Sendable, Hashable {
     public let kind: Kind
     public let attempts: [Attempt]
     /// The decision made for the final attempt (or the only one, if nothing dispatched).
+    /// Its chain holds the plane's *registered* descriptors, never a resolver's copies.
     public let decision: Decision
+    /// Providers the resolver ranked but the plane refused to dispatch: hard-rule
+    /// violations found by `ResidencyAuditor`, and providers skipped because their
+    /// circuit was open (`.circuitOpen`, a soft reason, so `isHard` tells them apart).
     public let auditFindings: [ResidencyAuditor.Finding]
 
     public init(kind: Kind, attempts: [Attempt], decision: Decision, auditFindings: [ResidencyAuditor.Finding] = []) {
@@ -58,6 +62,21 @@ public struct CapabilityOutcome: Sendable, Hashable {
         self.decision = decision
         self.auditFindings = auditFindings
     }
+}
+
+/// One internally consistent view of the plane, read in a single actor hop. UIs should
+/// render from this instead of reading several properties across several `await`s,
+/// which can interleave with other updates and mix states.
+public struct PlaneSnapshot: Sendable {
+    public let context: RegionContext
+    public let jurisdictions: [Jurisdiction]
+    public let contextGeneration: UInt64
+    public let providers: [ProviderDescriptor]
+    public let decision: Decision
+    public let config: PlaneConfig
+    public let parity: ParityLedger
+    /// Providers with a kill switch that applies in `jurisdictions`.
+    public let killedProviderIDs: Set<String>
 }
 
 public enum ConfigError: Error, Sendable, Equatable {
@@ -72,16 +91,31 @@ public enum ConfigError: Error, Sendable, Equatable {
 /// before a suspension point is trusted after it. When an adapter returns, the plane
 /// re-audits that provider against the *current* context and config before using
 /// the answer.
+///
+/// Trust boundary: a resolver only *chooses and orders* providers. The auditor always
+/// checks the descriptor registered with the plane for each id, so a resolver that
+/// returns an altered copy (say, a US-hosted provider relabelled as on-device) cannot
+/// change what gets checked.
+///
+/// Deadlines: the plane imposes no per-attempt timeout. Structured concurrency cannot
+/// abandon a child task that ignores cancellation, so a plane-side timer would either
+/// still wait for a hung adapter or leak it. Adapters own their deadlines (for example
+/// `URLRequest.timeoutInterval`) and throw `ProviderError.timedOut`, which the plane
+/// treats as a failure: breaker and failover engage. Cancelling the caller's task
+/// still ends the request.
 public actor CapabilityPlane {
     public private(set) var context: RegionContext
     public private(set) var config: PlaneConfig
     public private(set) var parity: ParityLedger
-    /// Bumped whenever the set of binding jurisdictions or the OS version changes.
+    /// Bumped whenever the binding jurisdictions, the OS version or connectivity change.
+    /// In-flight answers are re-audited against hard rules when the generation moved.
     public private(set) var contextGeneration: UInt64 = 0
 
     private let jurisdictionMap: JurisdictionMap
     private let adapters: [String: any ProviderAdapter]
     private let descriptors: [ProviderDescriptor]
+    /// The registered descriptor for each id: the only descriptors the auditor trusts.
+    private let descriptorsByID: [String: ProviderDescriptor]
     private let resolver: any CapabilityResolving
     private let clock: any PlaneClock
     private let telemetry: any TelemetrySink
@@ -106,6 +140,7 @@ public actor CapabilityPlane {
         }
         self.adapters = byID
         self.descriptors = ordered
+        self.descriptorsByID = Dictionary(uniqueKeysWithValues: ordered.map { ($0.id, $0) })   // ids unique by construction
         self.config = config
         self.context = context
         self.jurisdictionMap = jurisdictionMap
@@ -136,6 +171,10 @@ public actor CapabilityPlane {
     }
 
     /// Applies a remote config if, and only if, it is strictly newer.
+    ///
+    /// Versions are meant to be counters far below `UInt64.max`. A config at
+    /// `UInt64.max` can never be superseded (and `updateKillSwitches` becomes a no-op),
+    /// so a publisher must never emit one; treat it as an operational error upstream.
     public func apply(_ newConfig: PlaneConfig) throws(ConfigError) {
         guard newConfig.version > config.version else {
             telemetry.record(.configRejected(offered: newConfig.version, current: config.version))
@@ -158,6 +197,15 @@ public actor CapabilityPlane {
         return next.version
     }
 
+    /// Flips a provider's kill switch for the jurisdictions binding *at this instant*,
+    /// in one atomic step: the scope and the update cannot interleave with a context
+    /// change. Returns the new config version.
+    @discardableResult
+    public func toggleProviderKill(_ providerID: String) -> UInt64 {
+        let scope = jurisdictions
+        return updateKillSwitches { $0.togglingKill(providerID, in: scope) }
+    }
+
     @discardableResult
     public func recordParity(_ score: Double, jurisdiction: Jurisdiction, capability: Capability, providerID: String) -> Bool {
         parity.record(score, jurisdiction: jurisdiction, capability: capability, providerID: providerID)
@@ -174,6 +222,15 @@ public actor CapabilityPlane {
         snapshotDecision(for: request, excluding: []).decision
     }
 
+    /// Everything a UI needs, read atomically (one actor hop, no suspension point).
+    public func snapshot(for request: CapabilityRequest) -> PlaneSnapshot {
+        let binding = jurisdictions
+        return PlaneSnapshot(
+            context: context, jurisdictions: binding, contextGeneration: contextGeneration,
+            providers: descriptors, decision: preview(request), config: config, parity: parity,
+            killedProviderIDs: Set(descriptors.map(\.id).filter { config.isProviderKilled($0, in: binding) }))
+    }
+
     private func snapshotDecision(for request: CapabilityRequest, excluding tried: Set<String>)
         -> (decision: Decision, approved: [ProviderDescriptor], findings: [ResidencyAuditor.Finding]) {
         let now = clock.now()
@@ -184,8 +241,15 @@ public actor CapabilityPlane {
             request: request, context: context, jurisdictions: binding,
             providers: descriptors.filter { !tried.contains($0.id) },
             config: config, parity: parity, health: verdicts)
-        let decision = resolver.resolve(input)
-        let audit = ResidencyAuditor.audit(chain: decision.chain, request: request, context: context,
+        let proposed = resolver.resolve(input)
+        // Trust boundary: audit, report and dispatch the *registered* descriptor for each id,
+        // never the resolver's copy. Unknown ids keep the resolver's descriptor; they have no
+        // adapter, so they can only ever end as `.missingAdapter`.
+        let chain = proposed.chain.map { descriptorsByID[$0.id] ?? $0 }
+        let decision = Decision(capability: proposed.capability, dataClass: proposed.dataClass,
+                                jurisdictions: proposed.jurisdictions, chain: chain,
+                                rejections: proposed.rejections, configVersion: proposed.configVersion)
+        let audit = ResidencyAuditor.audit(chain: chain, request: request, context: context,
                                            jurisdictions: binding, config: config)
         return (decision, audit.approved, audit.findings)
     }
@@ -224,10 +288,22 @@ public actor CapabilityPlane {
             // Filter `tried` here too: a custom resolver may ignore the exclusion list. The
             // breaker is enforced here as well, so a resolver that ignores `circuitOpen`
             // still cannot dispatch to an open breaker or alongside an in-flight probe.
+            // Skipped providers are reported, not silently dropped.
             let now = clock.now()
-            guard let next = snapshot.approved.first(where: {
-                !tried.contains($0.id) && health.verdict(for: $0.id, now: now) != .open
-            }) else { break }
+            var picked: ProviderDescriptor?
+            for candidate in snapshot.approved where !tried.contains(candidate.id) {
+                if health.verdict(for: candidate.id, now: now) == .open {
+                    let skipped = ResidencyAuditor.Finding(providerID: candidate.id, reasons: [.circuitOpen])
+                    if !allFindings.contains(skipped) {
+                        allFindings.append(skipped)
+                        telemetry.record(.auditBlocked(feature: request.featureID, providerID: candidate.id, reasons: [.circuitOpen]))
+                    }
+                    continue
+                }
+                picked = candidate
+                break
+            }
+            guard let next = picked else { break }
             tried.insert(next.id)
 
             guard let adapter = adapters[next.id] else {
