@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/rajatslakhina/ai-capability-plane-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/rajatslakhina/ai-capability-plane-kit/actions/workflows/ci.yml)
 
-Demo app: (link added after the companion repo is pushed)
+**Demo app:** [ai-capability-plane-demo-app](https://github.com/rajatslakhina/ai-capability-plane-demo-app). It's an iOS console that shows the plane's decision trace live, with real Simulator screenshots.
 
 ---
 
@@ -161,13 +161,12 @@ await plane.updateContext(newContext)
 
 What has actually been run, and where:
 
-- **Linux (Swift 6.0.3), clean build:** `rm -rf .build && swift build -Xswiftc -warnings-as-errors` has 0 warnings, and `swift test -Xswiftc -warnings-as-errors` passes **64/64**.
-- **macOS (Xcode 27.2, Apple silicon):**
-  - `swift test -Xswiftc -warnings-as-errors` passes the core suite plus the 4 `ConsoleModelTests`.
-  - `xcodebuild build -scheme CapabilityPlane-Package -destination 'generic/platform=iOS Simulator'` builds every product, including the SwiftUI target.
-- **iOS Simulator:** the companion demo app was built, installed and launched on an iPhone Duo Simulator (iOS 27.2) in four scripted scenarios, and screenshotted with `simctl`. Those runs resolved this package from a **local checkout**, not from a GitHub tag. See the demo repo for details.
-- **Independent review:** two rounds of review by a fresh reviewer with no build context. Round 1 found 10 issues and all were fixed. Round 2 passed. Its one recommended fix and its nits were then applied, and those last changes were not re-reviewed.
-- **GitHub Actions CI:** the workflow in `.github/workflows/ci.yml` has two jobs. The Linux job runs build and test with warnings as errors. The macOS job runs `swift test` and the iOS Simulator build. **CI has not run yet**: this copy was prepared before the repository was published. This section will be updated with the first real run.
+- **GitHub Actions** ([Actions tab](https://github.com/rajatslakhina/ai-capability-plane-kit/actions/workflows/ci.yml)). Both jobs passed on the `v1.0.0` commit and on the `v1.0.0` tag push:
+  - **Linux** (`swift:6.0` container): `swift build -Xswiftc -warnings-as-errors` succeeds, then `swift test -Xswiftc -warnings-as-errors` runs **64 tests with 0 failures**.
+  - **macOS** (`macos-15`): `swift test -Xswiftc -warnings-as-errors` runs **68 tests with 0 failures**. That is the 64 core tests plus the 4 `ConsoleModelTests`, which compile only where SwiftUI exists. Then `xcodebuild build -scheme CapabilityPlane-Package -destination 'generic/platform=iOS Simulator'` builds every product, including the SwiftUI target.
+- **Locally:** a clean Linux build (Swift 6.0.3) after `rm -rf .build` has 0 warnings. On a Mac with Xcode 27.2, the same test totals as CI.
+- **iOS Simulator:** the companion demo app was built **against this package resolved from GitHub at `v1.0.0`** (its `Package.resolved` pins revision `9254e65`). It was installed and launched on an iPhone Duo Simulator (iOS 27.2) and ran a request through `CapabilityPlane.perform`, with on-device failing over to the US-hosted cloud. Earlier scenario runs, which produced the demo's screenshots, used a local checkout of the same code.
+- **Independent review:** two rounds by a fresh reviewer with no build context. Round 1 found 10 issues and all were fixed. Round 2 passed. Its one recommended fix and its nits were then applied, and those last changes were not re-reviewed.
 
 ## Requirements
 
